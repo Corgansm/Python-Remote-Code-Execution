@@ -27,7 +27,7 @@ This project is a Python-based Remote Code Execution (RCE) tool designed for edu
      - `cd <directory>`: Change the current working directory.
      - `upload <filename>`: Upload a file to the target machine.
      - `download <filename>`: Download a file from a specified URL.
-     - `minecraft <command>`: Send keystrokes to a Minecraft process (requires PID).
+     - `pidtxt <command>`: Send keystrokes to a process (requires PID.txt file and only really works on minecraft server console processes).
      - `kill`: Terminate specific processes (e.g., Java).
 
 4. **File Management**:
