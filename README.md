@@ -11,6 +11,7 @@ This project is a Python-based Remote Code Execution (RCE) tool designed for edu
 - **Stealth Mode**: Hide the command prompt window on Windows systems.
 - **Obfuscation**: Target IP and port are base64 encoded for basic obfuscation.
 - **Process Termination**: Terminate specific processes (e.g., Java) remotely.
+- **Screen Share**: Share the Victim's screen to the attacker's screen.
 
 ## Usage
 
