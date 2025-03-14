@@ -255,7 +255,7 @@ def handle_connection(s):
                 elif command == ("start_stream"):
                     streamer = FullFrameStreamer('10.0.0.22')  # Replace with actual IP
                     streamer.connect()
-                    output = "Streaming started\n"
+                    output = str(streamer.resolution[0]) + ":" + str(streamer.resolution[1])
 
 
                 elif command.startswith("upload "):
