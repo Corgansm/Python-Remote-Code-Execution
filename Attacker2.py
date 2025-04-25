@@ -290,8 +290,9 @@ class NcatGUI(ctk.CTk):
         self.history_frame.grid_rowconfigure(1, weight=1)  # History list
         
         # Screen Share tab
+        # Screen Share tab - Instantiate the new class
         self.screen_share_tab = ScreenShareTab(self.tabview.tab("Screen Share"), self, COLORS)
-        self.screen_share_tab.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        self.screen_share_tab.pack(fill="both", expand=True) # Use pack or grid as needed for the tab content
 
         # Search bar with improved styling
         self.search_frame = ctk.CTkFrame(self.history_frame, fg_color=COLORS["bg_secondary"])
@@ -462,10 +463,8 @@ class NcatGUI(ctk.CTk):
     def on_connection_dropdown_change(self, choice):
         """Called when dropdown selection changes"""
         print(f"Dropdown changed to: {choice}")
-    
-        # Update screen share tab if it exists
-        if hasattr(self, 'screen_share_tab'):
-            self.screen_share_tab.add_ip(choice)
+        #self.screen_share_tab.add_ip(choice)  # Update the screen share tab with the selected connection
+        #self.screen_share_tab.update_connection_list()  # Update the connection list in the screen share tab
 
 
     def print_window_size_loop(self):
@@ -1108,6 +1107,7 @@ class NcatGUI(ctk.CTk):
                                 self.connection_info[connection_id]["user"] = user_info
                             
                         # Update treeview with new information
+                        self.screen_share_tab.add_ip(connection_id)
                         self.tree.item(str(connection_id), values=(
                             connection_id,
                             self.connection_info[connection_id]["ip"],
@@ -1203,6 +1203,7 @@ class NcatGUI(ctk.CTk):
                     ip = self.connection_info[conn_id]["ip"]
                     port = self.connection_info[conn_id]["port"]
                     connections.append(f"{ip}:{port}")
+                    self.screen_share_tab.add_ip(conn_id)
                     
             # Update dropdown
             self.connection_dropdown.configure(values=connections)
@@ -1212,6 +1213,8 @@ class NcatGUI(ctk.CTk):
                 self.connection_var.set(current)
             else:
                 self.connection_var.set("All")
+
+            print(connections)
                 
         except Exception as e:
             print(f"Error updating connection dropdown: {e}")
@@ -1407,6 +1410,9 @@ class NcatGUI(ctk.CTk):
         self.console_output.see("end")
         self.console_output.config(state="disabled")
 
+    # add_ip from screensharetab
+    
+
     def show_connection_menu(self, event):
         """Show a custom context menu using CTkFrame and CTkButton"""
         # Get the item that was clicked on
@@ -1597,6 +1603,9 @@ class NcatGUI(ctk.CTk):
                 # Remove from screen share tab
             #    self.screen_share_tab.ip_frames[conn_id]["frame"].destroy()
             #    del self.screen_share_tab.ip_frames[conn_id]
+
+            if hasattr(self, 'screen_share_tab'):
+                self.screen_share_tab.connection_removed(conn_id)
             
             # Update console
             self.update_console(f"[-] Connection {conn_id} removed", "info")
@@ -1824,6 +1833,7 @@ class NcatGUI(ctk.CTk):
                                 # Update screen share tab preview if it exists
                                 if hasattr(self, 'screen_share_tab'):
                                     try:
+                                        self.screen_share_tab.connection_added(conn_id)
                                         # Convert PIL image to numpy array for the screen share tab
                                         frame_array = np.array(img)
                                         # Convert RGB to BGR for OpenCV compatibility

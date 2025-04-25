@@ -101,7 +101,7 @@ if __name__ == "__main__":
     # Get local IP address to display helpful message
     # (This part is optional but helpful for the user)
     host_ip = '0.0.0.0' # Default listen address
-    port = 5000
+    port = 80
     try:
         import socket
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
